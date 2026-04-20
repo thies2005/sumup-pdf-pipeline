@@ -231,7 +231,7 @@ setup_dependencies() {
     if ! python3 -c "
 import os, logging
 os.environ['USE_TF'] = '0'
-os.environ['USE_TORCH'] = '0'
+os.environ['USE_TORCH'] = '1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.getLogger('doctr').setLevel(logging.ERROR)
 from doctr.models import ocr_predictor
@@ -313,7 +313,7 @@ import os
 import logging
 
 os.environ["USE_TF"] = "0"
-os.environ["USE_TORCH"] = "0"
+os.environ["USE_TORCH"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 logging.getLogger("doctr").setLevel(logging.ERROR)
 
