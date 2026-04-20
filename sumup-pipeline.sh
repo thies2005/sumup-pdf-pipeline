@@ -513,6 +513,34 @@ ${file_list}
 PROMPT
 }
 
+write_dedup_prompt() {
+  local target_file="$1" prompt_file="$2" course="$3"
+  cat > "$prompt_file" <<PROMPT
+You are a meticulous academic editor reviewing a combined master summary for: ${course}.
+You are reading the attached MASTER_SUMMARY.md file.
+
+Your ONLY job is to EDIT the file in-place. Do NOT rewrite the whole file.
+Use your edit/replace tools to make targeted changes.
+
+TASKS (in priority order):
+1. REMOVE EXACT DUPLICATES: Find paragraphs, bullet points, or sections that appear
+   more than once and delete the duplicate occurrences (keep the first/best version).
+2. MERGE NEAR-DUPLICATES: If two sections cover the same topic with slightly different
+   wording, merge them into one comprehensive version.
+3. FIX STRUCTURE: Remove any duplicate headers, fix broken markdown formatting,
+   ensure consistent heading hierarchy (# > ## > ### > ####).
+4. REMOVE ARTIFACTS: Delete any leftover "Source Documents" or metadata sections
+   that appear mid-document from the concatenation of parts.
+
+CRITICAL RULES:
+- Do NOT remove any unique facts, details, or information.
+- Do NOT rephrase or summarize content — preserve original wording.
+- Do NOT add new content.
+- ONLY delete true duplicates and fix formatting.
+- Work through the file systematically from top to bottom.
+PROMPT
+}
+
 write_master_anki_prompt() {
   local outfile="$1" prompt_file="$2" course="$3"
   cat > "$prompt_file" <<PROMPT
@@ -606,6 +634,29 @@ run_master_model() {
     return 1
   fi
   [ -s "$expected_output" ]
+}
+
+run_dedup_model() {
+  local target_file="$1" prompt_file="$2" log_file="$3" out_dir="$4"
+  local before_size
+  before_size=$(wc -c < "$target_file" | tr -d ' ')
+  if ! ( cd "$out_dir" && timeout "$TIMEOUT_REDUCE" opencode run -m "$MODEL" -f "$target_file" < "$prompt_file" > "$log_file" 2>&1 ); then
+    return 1
+  fi
+  # Verify file still exists and wasn't emptied
+  if [ ! -s "$target_file" ]; then
+    warn "  ✗ Dedup destroyed the file — restoring from backup"
+    return 1
+  fi
+  local after_size
+  after_size=$(wc -c < "$target_file" | tr -d ' ')
+  local removed=$((before_size - after_size))
+  if [ "$removed" -gt 0 ]; then
+    log "    ✓ Dedup removed ${removed} bytes of duplicates"
+  else
+    log "    ✓ Dedup: no duplicates found"
+  fi
+  return 0
 }
 
 validate_csv() {
@@ -929,6 +980,20 @@ process_master() {
                 local final_lines
                 final_lines=$(wc -l < "$FINAL_MD" | tr -d ' ')
                 log "    ✓ Final MASTER_SUMMARY.md merged ($final_lines lines)"
+                # Post-merge: LLM dedup review pass
+                log "  → Running AI dedup review on MASTER_SUMMARY.md..."
+                cp "$FINAL_MD" "${FINAL_MD}.bak"
+                write_dedup_prompt "$FINAL_MD" "$state_dir/master_dedup.txt" "$course_name"
+                if with_retry "$MAX_RETRIES" "Dedup Review" run_dedup_model "$FINAL_MD" "$state_dir/master_dedup.txt" "$state_dir/master_dedup.log" "$d"; then
+                  rm -f "${FINAL_MD}.bak"
+                else
+                  warn "    ⚠ Dedup review failed, keeping raw merged version"
+                  if [ ! -s "$FINAL_MD" ] && [ -s "${FINAL_MD}.bak" ]; then
+                    mv "${FINAL_MD}.bak" "$FINAL_MD"
+                  else
+                    rm -f "${FINAL_MD}.bak"
+                  fi
+                fi
               else
                 warn "    ✗ Master Reduce failed (empty output)"
               fi
@@ -944,6 +1009,20 @@ process_master() {
           else
             if with_retry "$MAX_RETRIES" "Master Summary" run_master_model "$MASTER_MD" "$state_dir/master_sum.txt" "$state_dir/master_sum.log" "$d" "${MD_LIST[@]}"; then
               log "    ✓ MASTER_SUMMARY.md"
+              # Post-create: LLM dedup review pass
+              log "  → Running AI dedup review on MASTER_SUMMARY.md..."
+              cp "$MASTER_MD" "${MASTER_MD}.bak"
+              write_dedup_prompt "$MASTER_MD" "$state_dir/master_dedup.txt" "$course_name"
+              if with_retry "$MAX_RETRIES" "Dedup Review" run_dedup_model "$MASTER_MD" "$state_dir/master_dedup.txt" "$state_dir/master_dedup.log" "$d"; then
+                rm -f "${MASTER_MD}.bak"
+              else
+                warn "    ⚠ Dedup review failed, keeping original"
+                if [ ! -s "$MASTER_MD" ] && [ -s "${MASTER_MD}.bak" ]; then
+                  mv "${MASTER_MD}.bak" "$MASTER_MD"
+                else
+                  rm -f "${MASTER_MD}.bak"
+                fi
+              fi
             else
               warn "    ✗ Master Summary failed"
             fi
