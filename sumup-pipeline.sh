@@ -1006,7 +1006,7 @@ process_oldexam() {
 
 if [ ! -d "$WIN_INPUT" ]; then warn "✗ Input folder not found: $WIN_INPUT"; exit 1; fi
 
-if [ "$DRY_RUN" -eq 0 ] && [ "$CLEAN_MODE" -eq 0 ] && [ "$DEFAULT_MODE" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$DEFAULT_MODE" -eq 0 ]; then
   choose_pipeline
   choose_anki_style
   choose_extraction_mode
