@@ -8,7 +8,7 @@ WSL_OUTPUT="$WSL_WORK/summaries"
 WSL_STATE="$WSL_WORK/.state"
 WIN_OUTPUT="/mnt/c/Users/thies/Documents/sumup/summaries"
 
-TIMEOUT_DOC=240
+TIMEOUT_DOC=600
 TIMEOUT_REDUCE=900
 MAX_RETRIES=2
 GROUP_SIZE=3
@@ -24,8 +24,22 @@ EXTRACT_CONCURRENCY=4
 DRY_RUN=0
 CLEAN_MODE=0
 DEFAULT_MODE=0
+REMOVE_FAILED_MODE=0
 
 # --- Helpers ---
+cleanup_background_jobs() {
+  echo "" >&2
+  echo "⚠ Script interrupted! Cleaning up background processes..." >&2
+  local child_pids
+  child_pids=$(jobs -p 2>/dev/null)
+  if [ -n "$child_pids" ]; then
+    kill $child_pids 2>/dev/null || true
+    wait $child_pids 2>/dev/null || true
+  fi
+  exit 1
+}
+trap cleanup_background_jobs INT TERM
+
 log() { echo "$*"; }
 warn() { echo "$*" >&2; }
 require_cmd() {
@@ -63,15 +77,17 @@ safe_read() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -c|--clean)   CLEAN_MODE=1 ;;
+    -r|--remove-failed) REMOVE_FAILED_MODE=1 ;;
     -n|--dry-run) DRY_RUN=1 ;;
     -d|--default) DEFAULT_MODE=1 ;;
     -h|--help)
       cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
-  -c, --clean    Wipe workspace before running
-  -n, --dry-run  Do not call APIs or OCR, just simulate outputs
-  -d, --default  Skip all prompts, use default options
-  -h, --help     Show this help
+  -c, --clean          Wipe workspace before running
+  -r, --remove-failed  Remove all .failed markers to retry failed docs
+  -n, --dry-run        Do not call APIs or OCR, just simulate outputs
+  -d, --default        Skip all prompts, use default options
+  -h, --help           Show this help
 EOF
       exit 0
       ;;
@@ -89,6 +105,25 @@ if [ "$CLEAN_MODE" -eq 1 ]; then
 fi
 
 mkdir -p "$WSL_OUTPUT" "$WSL_STATE" "$WIN_OUTPUT" "$WSL_WORK"
+
+if [ "$REMOVE_FAILED_MODE" -eq 1 ]; then
+  local_failed_count=$(find "$WSL_STATE" -name "*.failed" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$local_failed_count" -gt 0 ]; then
+    # Also remove broken output files for each failed document
+    while IFS= read -r failed_file; do
+      local_base=$(basename "$failed_file" .failed)
+      local_dir=$(dirname "$failed_file")
+      # Map state dir back to output dir
+      local_rel="${local_dir#$WSL_STATE}"
+      local_out_dir="$WSL_OUTPUT${local_rel}"
+      rm -f "$local_out_dir/${local_base}.csv" "$local_out_dir/${local_base}.md" 2>/dev/null || true
+    done < <(find "$WSL_STATE" -name "*.failed" 2>/dev/null)
+    find "$WSL_STATE" -name "*.failed" -delete 2>/dev/null || true
+    log "🗑️  Removed $local_failed_count failed marker(s) and their broken output files."
+  else
+    log "✓ No failed markers found."
+  fi
+fi
 
 # --- Interactive Menus ---
 
