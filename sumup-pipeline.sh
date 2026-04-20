@@ -46,12 +46,25 @@ safe_wait_all() {
   return "$rc"
 }
 
+# Safe read wrapper — handles non-interactive terminals (no TTY) gracefully.
+# When stdin is not a terminal (e.g. piped input, cron, CI), read -rp fails
+# under set -e. This wrapper catches the failure and returns the default.
+safe_read() {
+  local varname="$1" prompt="$2" default="${3:-}"
+  if [[ -t 0 ]]; then
+    read -rp "$prompt" "$varname" || eval "$varname='$default'"
+  else
+    warn "  (non-interactive) Using default: $default"
+    eval "$varname='$default'"
+  fi
+}
+
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -c|--clean)   CLEAN_MODE=1 ;;
     -n|--dry-run) DRY_RUN=1 ;;
--d|--default) DEFAULT_MODE=1 ;;
+    -d|--default) DEFAULT_MODE=1 ;;
     -h|--help)
       cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -87,7 +100,7 @@ choose_pipeline() {
   echo "  3) Only Summary Generation (Skip Anki)"
   echo "  4) Only Old Exam Ankis (Solve old exams, skip everything else)"
   echo ""
-  read -rp "Enter choice [1-4] (default 1): " P_CHOICE || P_CHOICE=""
+  safe_read P_CHOICE "Enter choice [1-4] (default 1): " ""
   case "$P_CHOICE" in
     2) PIPELINE_MODE="anki_only" ;;
     3) PIPELINE_MODE="summary_only" ;;
@@ -108,7 +121,7 @@ choose_anki_style() {
   echo "  2) Medium (Slightly bigger, 2 to 3 related facts per card)"
   echo "  3) Comprehensive (Big cards covering small topics)"
   echo ""
-  read -rp "Enter choice [1-3] (default 2): " A_CHOICE || A_CHOICE=""
+  safe_read A_CHOICE "Enter choice [1-3] (default 2): " ""
   case "$A_CHOICE" in
     1) ANKI_STYLE="atomic" ;;
     3) ANKI_STYLE="comprehensive" ;;
@@ -123,7 +136,7 @@ choose_extraction_mode() {
   echo "  2) Tesseract (Fast OCR) - Standard accuracy."
   echo "  3) DocTR / Mindee (Slow OCR) - High accuracy AI model."
   echo ""
-  read -rp "Enter choice [1-3] (default 1): " E_CHOICE || E_CHOICE=""
+  safe_read E_CHOICE "Enter choice [1-3] (default 1): " ""
   case "$E_CHOICE" in
     2) EXTRACT_MODE="tesseract" ;;
     3) EXTRACT_MODE="doctr" ;;
@@ -162,7 +175,7 @@ choose_overwrite() {
   echo "  1) Skip existing files (Resume/Fast)"
   echo "  2) Overwrite existing files (Force regenerate)"
   echo ""
-  read -rp "Enter choice [1-2] (default 1): " O_CHOICE || O_CHOICE=""
+  safe_read O_CHOICE "Enter choice [1-2] (default 1): " ""
   case "$O_CHOICE" in
     2) OVERWRITE=1 ;;
     *) OVERWRITE=0 ;;
@@ -177,7 +190,7 @@ choose_model() {
   echo "  3) GLM-5.1"
   echo "  4) GLM-5-Turbo"
   echo ""
-  read -rp "Enter choice [1-4] (default 4): " CHOICE || CHOICE=""
+  safe_read CHOICE "Enter choice [1-4] (default 4): " ""
   case "$CHOICE" in
     1) MODEL="zai-coding-plan/glm-4.7" ;;
     2) MODEL="zai-coding-plan/glm-5" ;;
@@ -190,8 +203,8 @@ choose_api_concurrency() {
   echo ""
   echo "Choose API concurrency level (1-10 parallel jobs for Model calls):"
   echo "  Default is 1."
-  read -rp "Enter choice (or press Enter for 1): " C_CHOICE || C_CHOICE=""
-  if [[ "$C_CHOICE" =~ ^[0-9]+$ ]] && [ "$C_CHOICE" -gt 0 ]; then
+  safe_read C_CHOICE "Enter choice (or press Enter for 1): " ""
+  if [[ "$C_CHOICE" =~ ^[0-9]+$ ]] && [ "$C_CHOICE" -gt 0 ] && [ "$C_CHOICE" -le 10 ]; then
     API_CONCURRENCY="$C_CHOICE"
   elif [[ -n "$C_CHOICE" ]]; then
     echo "  Invalid input, using default: $API_CONCURRENCY"
@@ -281,7 +294,9 @@ extract_pdf_tesseract() {
   local pdf="$1" txt="$2"
   local tmp_dir
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' RETURN
+  # Scope the cleanup trap to this function only using a subshell-safe pattern
+  _cleanup_tesseract() { rm -rf "$tmp_dir"; }
+  trap '_cleanup_tesseract' RETURN
 
   pdftoppm -png "$pdf" "$tmp_dir/page" >/dev/null 2>&1 || true
   : > "$txt"
@@ -481,12 +496,18 @@ CRITICAL FORMAT RULES:
 TASKS:
 - Combine all cards into one file.
 - Remove EXACT duplicate questions.
+- Preserve the original Tags from each card — do NOT alter them.
 - Do NOT alter the format or structure of the questions and answers.
 PROMPT
 }
 
 write_oldexam_prompt() {
-  local outfile="$1" prompt_file="$2" course="$3"
+  local outfile="$1" prompt_file="$2" course="$3" exam_filename="$4"
+  # Build a per-file tag: Course_OldExam::ExamFilename (sanitized)
+  local file_tag
+  file_tag=$(echo "${exam_filename}" | sed 's/\.pdf$//i' | tr ' ' '_' | tr -d ',"')
+  local full_tag="${course}_OldExam::${file_tag}"
+
   cat > "$prompt_file" <<PROMPT
 System Role: You are a University Professor creating Anki flashcards from past exams.
 Context: You are provided with an old exam document and a MASTER SUMMARY for the course ${course}.
@@ -506,7 +527,7 @@ Back for MCQs:
 Back for Free/Open Questions:
 - Provide the answer in bullet points using HTML: <ul><li>Point 1</li><li>Point 2</li></ul>
 - Reference the specific section from the summary.
-Tag: ${course}_OldExam
+Tag: ${full_tag}
 
 Execution: Process all unique questions found in the attached exam document.
 Write the final result to this exact path: ${outfile}
@@ -923,6 +944,8 @@ process_oldexam() {
   course_dir="$(dirname "$dir_name")"
   local base
   base="$(basename "$pdf" .pdf)"
+  local exam_filename
+  exam_filename="$(basename "$pdf")"
 
   [ "$dir_name" = "." ] && dir_name="General"
   [ "$course_dir" = "." ] && course_dir="General"
@@ -955,7 +978,8 @@ process_oldexam() {
   if [ ! -s "$solved_txt" ] || [ "$OVERWRITE" -eq 1 ]; then
     log "  → Solving Old Exam: $course_dir / $base"
 
-    write_oldexam_prompt "$solved_txt" "$state_dir/${base}_prompt.txt" "$(basename "$course_dir")" || {
+    # Pass the exam filename so the prompt can generate a per-file tag
+    write_oldexam_prompt "$solved_txt" "$state_dir/${base}_prompt.txt" "$(basename "$course_dir")" "$exam_filename" || {
       warn "  ✗ Failed to write prompt for $base"
       return 1
     }
@@ -991,7 +1015,7 @@ fi
 
 log ""
 log "╔══════════════════════════════════════╗"
-log "║      SumUp PDF Pipeline (v25.0)      ║"
+log "║      SumUp PDF Pipeline (v26.0)      ║"
 log "╚══════════════════════════════════════╝"
 [ "$DRY_RUN" -eq 1 ] && log "!!! DRY RUN MODE ACTIVE !!!"
 log "Pipeline    : $PIPELINE_MODE"
@@ -1106,7 +1130,7 @@ log "║            Log Aggregation           ║"
 log "╚══════════════════════════════════════╝"
 LOG_COUNT=$(find "$WSL_STATE" -name '*.log' 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 if [ "$LOG_COUNT" -gt 0 ]; then
-  grep -ihE "(✗|error|retry|failed|malformed)" "$WSL_STATE"/**/*.log 2>/dev/null || log "No major errors found in logs."
+  grep -rihE "(✗|error|retry|failed|malformed)" "$WSL_STATE" --include='*.log' 2>/dev/null || log "No major errors found in logs."
 else
   log "No logs generated."
 fi
