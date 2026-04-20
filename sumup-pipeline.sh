@@ -9,7 +9,7 @@ WSL_STATE="$WSL_WORK/.state"
 WIN_OUTPUT="/mnt/c/Users/thies/Documents/sumup/summaries"
 
 TIMEOUT_DOC=600
-TIMEOUT_REDUCE=900
+TIMEOUT_REDUCE=1500
 MAX_RETRIES=2
 GROUP_SIZE=3
 
@@ -900,15 +900,37 @@ process_master() {
         if [ "${#PART_FILES[@]}" -gt 0 ]; then
           local FINAL_MD="$d/MASTER_SUMMARY.md"
           if [ ! -s "$FINAL_MD" ] || [ "$OVERWRITE" -eq 1 ]; then
-            log "  → Merging Parts into FINAL MASTER SUMMARY: $course_name"
-            write_master_prompt "$FINAL_MD" "$state_dir/master_reduce.txt" "$course_name" "${PART_FILES[@]}"
+            log "  → Merging Parts into FINAL MASTER SUMMARY: $course_name (concat ${#PART_FILES[@]} parts)"
             if [ "$DRY_RUN" -eq 1 ]; then
               printf '# Dry run\n' > "$FINAL_MD"
             else
-              if with_retry "$MAX_RETRIES" "Master Reduce" run_master_model "$FINAL_MD" "$state_dir/master_reduce.txt" "$state_dir/master_reduce.log" "$d" "${PART_FILES[@]}"; then
-                log "    ✓ Final MASTER_SUMMARY.md merged"
+              # Build the final master by concatenating parts with a header.
+              # LLM reduce is unreliable for large docs (it can't output 100KB+
+              # in one shot and opencode run lacks file-write tools). Since each
+              # part is already thematically organized, simple concat is correct.
+              {
+                printf '# Master Summary — %s\n\n' "$course_name"
+                printf '**Generated**: %s  \n' "$(date '+%Y-%m-%d %H:%M')"
+                printf '**Source Documents Included:**\n'
+                for pf in "${PART_FILES[@]}"; do
+                  printf '- %s\n' "$(basename "$pf")"
+                done
+                printf '\n---\n\n'
+                local part_num=0
+                for pf in "${PART_FILES[@]}"; do
+                  part_num=$((part_num + 1))
+                  if [ "$part_num" -gt 1 ]; then
+                    printf '\n\n---\n\n'
+                  fi
+                  cat "$pf"
+                done
+              } > "$FINAL_MD"
+              if [ -s "$FINAL_MD" ]; then
+                local final_lines
+                final_lines=$(wc -l < "$FINAL_MD" | tr -d ' ')
+                log "    ✓ Final MASTER_SUMMARY.md merged ($final_lines lines)"
               else
-                warn "    ✗ Master Reduce failed"
+                warn "    ✗ Master Reduce failed (empty output)"
               fi
             fi
           fi
