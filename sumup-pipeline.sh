@@ -19,10 +19,11 @@ ANKI_STYLE="medium"
 EXTRACT_MODE="none"
 OVERWRITE=0
 MODEL="zai-coding-plan/glm-5-turbo"
-API_CONCURRENCY=2
+API_CONCURRENCY=1
 EXTRACT_CONCURRENCY=4
 DRY_RUN=0
 CLEAN_MODE=0
+DEFAULT_MODE=0
 
 # --- Helpers ---
 log() { echo "$*"; }
@@ -50,11 +51,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -c|--clean)   CLEAN_MODE=1 ;;
     -n|--dry-run) DRY_RUN=1 ;;
+-d|--default) DEFAULT_MODE=1 ;;
     -h|--help)
       cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
   -c, --clean    Wipe workspace before running
   -n, --dry-run  Do not call APIs or OCR, just simulate outputs
+  -d, --default  Skip all prompts, use default options
   -h, --help     Show this help
 EOF
       exit 0
@@ -84,7 +87,7 @@ choose_pipeline() {
   echo "  3) Only Summary Generation (Skip Anki)"
   echo "  4) Only Old Exam Ankis (Solve old exams, skip everything else)"
   echo ""
-  read -rp "Enter choice [1-4] (default 1): " P_CHOICE
+  read -rp "Enter choice [1-4] (default 1): " P_CHOICE || P_CHOICE=""
   case "$P_CHOICE" in
     2) PIPELINE_MODE="anki_only" ;;
     3) PIPELINE_MODE="summary_only" ;;
@@ -105,7 +108,7 @@ choose_anki_style() {
   echo "  2) Medium (Slightly bigger, 2 to 3 related facts per card)"
   echo "  3) Comprehensive (Big cards covering small topics)"
   echo ""
-  read -rp "Enter choice [1-3] (default 2): " A_CHOICE
+  read -rp "Enter choice [1-3] (default 2): " A_CHOICE || A_CHOICE=""
   case "$A_CHOICE" in
     1) ANKI_STYLE="atomic" ;;
     3) ANKI_STYLE="comprehensive" ;;
@@ -120,7 +123,7 @@ choose_extraction_mode() {
   echo "  2) Tesseract (Fast OCR) - Standard accuracy."
   echo "  3) DocTR / Mindee (Slow OCR) - High accuracy AI model."
   echo ""
-  read -rp "Enter choice [1-3] (default 1): " E_CHOICE
+  read -rp "Enter choice [1-3] (default 1): " E_CHOICE || E_CHOICE=""
   case "$E_CHOICE" in
     2) EXTRACT_MODE="tesseract" ;;
     3) EXTRACT_MODE="doctr" ;;
@@ -159,7 +162,7 @@ choose_overwrite() {
   echo "  1) Skip existing files (Resume/Fast)"
   echo "  2) Overwrite existing files (Force regenerate)"
   echo ""
-  read -rp "Enter choice [1-2] (default 1): " O_CHOICE
+  read -rp "Enter choice [1-2] (default 1): " O_CHOICE || O_CHOICE=""
   case "$O_CHOICE" in
     2) OVERWRITE=1 ;;
     *) OVERWRITE=0 ;;
@@ -174,7 +177,7 @@ choose_model() {
   echo "  3) GLM-5.1"
   echo "  4) GLM-5-Turbo"
   echo ""
-  read -rp "Enter choice [1-4] (default 4): " CHOICE
+  read -rp "Enter choice [1-4] (default 4): " CHOICE || CHOICE=""
   case "$CHOICE" in
     1) MODEL="zai-coding-plan/glm-4.7" ;;
     2) MODEL="zai-coding-plan/glm-5" ;;
@@ -186,8 +189,8 @@ choose_model() {
 choose_api_concurrency() {
   echo ""
   echo "Choose API concurrency level (1-10 parallel jobs for Model calls):"
-  echo "  Default is 2."
-  read -rp "Enter choice (or press Enter for 2): " C_CHOICE
+  echo "  Default is 1."
+  read -rp "Enter choice (or press Enter for 1): " C_CHOICE || C_CHOICE=""
   if [[ "$C_CHOICE" =~ ^[0-9]+$ ]] && [ "$C_CHOICE" -gt 0 ]; then
     API_CONCURRENCY="$C_CHOICE"
   elif [[ -n "$C_CHOICE" ]]; then
@@ -977,7 +980,7 @@ process_oldexam() {
 
 if [ ! -d "$WIN_INPUT" ]; then warn "✗ Input folder not found: $WIN_INPUT"; exit 1; fi
 
-if [ "$DRY_RUN" -eq 0 ] && [ "$CLEAN_MODE" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$CLEAN_MODE" -eq 0 ] && [ "$DEFAULT_MODE" -eq 0 ]; then
   choose_pipeline
   choose_anki_style
   choose_extraction_mode
