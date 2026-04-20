@@ -166,7 +166,9 @@ choose_extraction_mode() {
   else
     EXTRACT_CONCURRENCY=$cores
   fi
-  [ "$EXTRACT_CONCURRENCY" -lt 1 ] && EXTRACT_CONCURRENCY=1
+  if [ "$EXTRACT_CONCURRENCY" -lt 1 ]; then
+    EXTRACT_CONCURRENCY=1
+  fi
 }
 
 choose_overwrite() {
