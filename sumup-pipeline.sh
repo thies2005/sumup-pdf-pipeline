@@ -134,12 +134,14 @@ choose_pipeline() {
   echo "  2) Only Anki Generation (Direct from text, skip summaries)"
   echo "  3) Only Summary Generation (Skip Anki)"
   echo "  4) Only Old Exam Ankis (Solve old exams, skip everything else)"
+  echo "  5) Only Anki Generation (From existing summaries, skip text)"
   echo ""
-  safe_read P_CHOICE "Enter choice [1-4] (default 1): " ""
+  safe_read P_CHOICE "Enter choice [1-5] (default 1): " ""
   case "$P_CHOICE" in
     2) PIPELINE_MODE="anki_only" ;;
     3) PIPELINE_MODE="summary_only" ;;
     4) PIPELINE_MODE="oldexam_only" ;;
+    5) PIPELINE_MODE="anki_from_summary" ;;
     *) PIPELINE_MODE="full" ;;
   esac
 }
@@ -453,7 +455,7 @@ CRITICAL FORMAT RULES:
 #separator:Comma
 #html:false
 #notetype:Basic
-#deck:SumUp::${course}
+#deck:SumUp::${course}::${title}
 2. Line 5: "Front","Back","Tags"
 3. Every row: "question","answer","${tag}"
 4. NO markdown code blocks, NO backticks.
@@ -473,9 +475,10 @@ Strictly follow Piotr Wozniak's "20 Rules of Formulating Knowledge":
 PROMPT
   elif [ "$ANKI_STYLE" = "medium" ]; then
     cat >> "$prompt_file" <<PROMPT
-1. Medium Focus: Group 2 to 3 closely related facts or concepts together per card.
-2. Structure: The "Back" of the card should use short bullet points to list the facts clearly.
-3. Cueing: The "Front" should ask a slightly broader but targeted question.
+1. Medium Focus: Group 2 to 3 closely related facts per card — no more.
+2. Hard Limits: The "Back" MUST contain MAXIMUM 2-3 bullet points. The entire "Back" field MUST NOT exceed 30 words total. 
+3. Brevity: Each bullet point should be a short, punchy phrase — not a full sentence. Strip all filler words.
+4. Cueing: The "Front" should ask a targeted question that covers exactly the facts on the back.
 PROMPT
   elif [ "$ANKI_STYLE" = "comprehensive" ]; then
     cat >> "$prompt_file" <<PROMPT
@@ -730,7 +733,7 @@ extract_document() {
   if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "summary_only" ]; then
     if [ ! -s "$md" ] || [ "$OVERWRITE" -eq 1 ]; then needs_summary=1; fi
   fi
-  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ]; then
+  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ] || [ "$PIPELINE_MODE" = "anki_from_summary" ]; then
     if [ ! -s "$csv" ] || [ "$OVERWRITE" -eq 1 ]; then needs_anki=1; fi
   fi
   if [[ "$rel_path" == *"/oldexams/"* ]]; then
@@ -747,7 +750,11 @@ extract_document() {
   )
   local prefix="[$current/$total_docs]"
 
-  if [ "$needs_summary" -eq 1 ] || [ "$needs_anki" -eq 1 ]; then
+  local needs_extract=0
+  if [ "$needs_summary" -eq 1 ]; then needs_extract=1; fi
+  if [ "$needs_anki" -eq 1 ] && [ "$PIPELINE_MODE" != "anki_from_summary" ]; then needs_extract=1; fi
+
+  if [ "$needs_extract" -eq 1 ]; then
     if [ ! -s "$txt" ] || [ "$OVERWRITE" -eq 1 ]; then
       if [ "$DRY_RUN" -eq 1 ]; then
         log "  $prefix (Dry Run) Extracting text: $base"
@@ -765,7 +772,7 @@ extract_document() {
       log "  ✓ $prefix Extracted text exists: $base"
     fi
   else
-    log "  ✓ $prefix Content already exists: $base"
+    log "  ✓ $prefix Skipped extraction: $base"
   fi
 }
 
@@ -798,7 +805,7 @@ process_api_document() {
   local csv="$out_dir/${base}.csv"
 
   if [ -f "$state_dir/${base}.failed" ]; then return 1; fi
-  if [ ! -s "$txt" ]; then
+  if [ "$PIPELINE_MODE" != "anki_from_summary" ] && [ ! -s "$txt" ]; then
     warn "  ✗ Source text missing or empty for: $course_name/$base"
     touch "$state_dir/${base}.failed"
     return 1
@@ -810,7 +817,7 @@ process_api_document() {
   if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "summary_only" ]; then
     if [ ! -s "$md" ] || [ "$OVERWRITE" -eq 1 ]; then needs_summary=1; fi
   fi
-  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ]; then
+  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ] || [ "$PIPELINE_MODE" = "anki_from_summary" ]; then
     if [ ! -s "$csv" ] || [ "$OVERWRITE" -eq 1 ]; then needs_anki=1; fi
   fi
 
@@ -843,7 +850,9 @@ process_api_document() {
 
   if [ "$needs_anki" -eq 1 ]; then
     local anki_source="$txt"
-    [ "$PIPELINE_MODE" = "full" ] && anki_source="$md"
+    if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_from_summary" ]; then
+      anki_source="$md"
+    fi
 
     if [ -s "$anki_source" ]; then
       write_anki_prompt "$base" "$csv" "$state_dir/${base}_anki.txt" "$course_name"
@@ -854,7 +863,7 @@ process_api_document() {
 #separator:Comma
 #html:false
 #notetype:Basic
-#deck:SumUp::${course_name}
+#deck:SumUp::${course_name}::${base}
 Front,Back,Tags
 "Dry run question","Dry run answer","${course_name}_${base}"
 EOF
@@ -964,7 +973,8 @@ process_master() {
                 printf '**Generated**: %s  \n' "$(date '+%Y-%m-%d %H:%M')"
                 printf '**Source Documents Included:**\n'
                 for pf in "${PART_FILES[@]}"; do
-                  printf '- %s\n' "$(basename "$pf")"
+                  local _bn; _bn=$(basename "$pf")
+                  printf '%s\n' "- $_bn"
                 done
                 printf '\n---\n\n'
                 local part_num=0
@@ -1032,14 +1042,13 @@ process_master() {
     fi
   fi
 
-  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ]; then
+  if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "anki_only" ] || [ "$PIPELINE_MODE" = "anki_from_summary" ]; then
     local CSV_LIST=()
     while IFS= read -r -d '' f; do CSV_LIST+=("$f"); done < <(find "$d" -maxdepth 1 -name '*.csv' ! -iname 'master_anki*' -print0 | sort -z)
     if [ "${#CSV_LIST[@]}" -gt 0 ]; then
       local MASTER_CSV="$d/MASTER_ANKI.csv"
       if [ ! -s "$MASTER_CSV" ] || [ "$OVERWRITE" -eq 1 ]; then
         log "  → Compiling Master Anki: $course_name"
-        write_master_anki_prompt "$MASTER_CSV" "$state_dir/master_anki.txt" "$course_name"
         if [ "$DRY_RUN" -eq 1 ]; then
           cat > "$MASTER_CSV" <<EOF
 #separator:Comma
@@ -1050,18 +1059,56 @@ Front,Back,Tags
 "Dry run question","Dry run answer","${course_name}_master"
 EOF
         else
-          if with_retry "$MAX_RETRIES" "Master Anki" run_master_model "$MASTER_CSV" "$state_dir/master_anki.txt" "$state_dir/master_anki.log" "$d" "${CSV_LIST[@]}"; then
-            if validate_csv "$MASTER_CSV"; then
-              log "    ✓ MASTER_ANKI.csv"
-            else
-              warn "    ✗ MASTER_ANKI.csv failed validation"
-              rm -f "$MASTER_CSV"
-            fi
-          else
-            warn "    ✗ Master Anki failed"
-          fi
+          cat > "$MASTER_CSV" <<EOF
+#separator:Comma
+#html:false
+#notetype:Basic
+Front,Back,Tags
+EOF
+          for f in "${CSV_LIST[@]}"; do
+            # Inject the per-document deck routing line
+            grep '^#deck:' "$f" >> "$MASTER_CSV" || echo "#deck:SumUp::${course_name}" >> "$MASTER_CSV"
+            # Extract data rows only — strip all header/meta lines safely without splitting on commas
+            grep -v '^#' "$f" | grep -v -i '^"Front","Back"' | grep -v -i '^Front,Back' >> "$MASTER_CSV"
+          done
+          log "    ✓ MASTER_ANKI.csv (combined ${#CSV_LIST[@]} decks)"
         fi
       fi
+    fi
+  fi
+
+}
+
+compile_master_oldexams() {
+  local d="$1"
+  if [[ "$d" == *"/oldexams"* ]]; then return 0; fi
+  if [ ! -d "$d/exam_ankis" ]; then return 0; fi
+
+  local course_name
+  course_name="$(basename "$d")"
+  [ "$course_name" = "summaries" ] && course_name="General"
+
+  local EXAM_LIST=()
+  while IFS= read -r -d '' f; do EXAM_LIST+=("$f"); done < <(find "$d/exam_ankis" -maxdepth 1 -name '*_solved.txt' -print0 | sort -z)
+  if [ "${#EXAM_LIST[@]}" -gt 0 ]; then
+    local MASTER_OLDEXAMS="$d/MASTER_OLDEXAMS.csv"
+    if [ ! -s "$MASTER_OLDEXAMS" ] || [ "$OVERWRITE" -eq 1 ]; then
+      log "  → Compiling Master Old Exams: $course_name"
+      cat > "$MASTER_OLDEXAMS" <<EOF
+#separator:Pipe
+#html:false
+#notetype:Basic
+Front|Back|Tags
+EOF
+      for f in "${EXAM_LIST[@]}"; do
+        local exam_base
+        exam_base=$(basename "$f" _solved.txt)
+        # Inject dynamic subdeck routing: SumUp::Oldexams <Course>::<ExamName>
+        echo "#deck:SumUp::Oldexams ${course_name}::${exam_base}" >> "$MASTER_OLDEXAMS"
+        grep -v '^```' "$f" | grep '|' >> "$MASTER_OLDEXAMS"
+      done
+      echo "" >> "$MASTER_OLDEXAMS"
+      log "    ✓ MASTER_OLDEXAMS.csv (${#EXAM_LIST[@]} exams combined)"
     fi
   fi
 }
@@ -1125,7 +1172,7 @@ process_oldexam() {
     if [ "$DRY_RUN" -eq 1 ]; then
       printf 'Question | Answer | Tag\n' > "$solved_txt"
     else
-      if with_retry "$MAX_RETRIES" "Old Exam $base" run_master_model "$solved_txt" "$state_dir/${base}_prompt.txt" "$state_dir/${base}_prompt.log" "$exam_anki_dir" "$txt" "$master_md"; then
+      if with_retry "$MAX_RETRIES" "Old Exam $base" run_master_model "$solved_txt" "$state_dir/${base}_prompt.txt" "$state_dir/${base}_prompt.log" "$course_out_dir" "$txt" "$master_md"; then
         log "  ✓ Solved $base -> exam_ankis/${base}_solved.txt"
       else
         warn "  ✗ Failed to solve $base"
@@ -1246,6 +1293,18 @@ if [ "$PIPELINE_MODE" = "full" ] || [ "$PIPELINE_MODE" = "oldexam_only" ]; then
       done
     fi
   done < <(find "$WSL_WORK" -type f -iname '*.pdf' -print0)
+  safe_wait_all "${pids[@]:-}" || true
+
+  # Compile MASTER_OLDEXAMS.csv now that all exams are solved
+  pids=()
+  while IFS= read -r -d '' d; do
+    compile_master_oldexams "$d" &
+    pids+=($!)
+    while [ "${#pids[@]}" -ge "$API_CONCURRENCY" ]; do
+      if ! wait "${pids[0]}" 2>/dev/null; then :; fi
+      pids=("${pids[@]:1}")
+    done
+  done < <(find "$WSL_OUTPUT" -type d -print0)
   safe_wait_all "${pids[@]:-}" || true
 else
   log ""
